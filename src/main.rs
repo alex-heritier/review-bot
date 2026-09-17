@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     net::SocketAddr,
     sync::Arc,
 };
@@ -39,26 +39,37 @@ const CONFIG_FILE: &str = ".review-bot.yaml";
 #[derive(Debug, Parser)]
 #[command(
     name = "github-pr-review-bot",
-    about = "Review your GitHub pull requests with an LLM"
+    version,
+    about = "Review your GitHub pull requests with an LLM",
+    long_about = "Self-hosted GitHub PR review bot.\n\nValues are resolved as: CLI flag > environment variable > .review-bot.yaml > default.\nWhen run interactively, missing required values are prompted for and saved to .review-bot.yaml."
 )]
 struct Args {
-    #[arg(long)]
-    github_app_id: Option<u64>,
-    #[arg(long)]
-    github_private_key_path: Option<String>,
-    #[arg(long)]
+    /// GitHub username; only PRs opened by this user are reviewed
+    #[arg(long, value_name = "USERNAME", env = "GITHUB_USERNAME")]
     github_username: Option<String>,
-    #[arg(long)]
+    /// GitHub App ID (the number shown in the App settings page)
+    #[arg(long, value_name = "ID", env = "GITHUB_APP_ID")]
+    github_app_id: Option<u64>,
+    /// Path to the downloaded GitHub App private key PEM file
+    #[arg(long, value_name = "PATH", env = "GITHUB_PRIVATE_KEY_PATH")]
+    github_private_key_path: Option<String>,
+    /// GitHub App webhook secret (must match the secret configured on the App)
+    #[arg(long, value_name = "SECRET", env = "WEBHOOK_SECRET")]
     webhook_secret: Option<String>,
-    #[arg(long)]
+    /// API key for the OpenAI-compatible chat completions API
+    #[arg(long, value_name = "KEY", env = "OPENAI_API_KEY")]
     openai_api_key: Option<String>,
-    #[arg(long)]
+    /// LLM model [default: gpt-4o-mini]
+    #[arg(long, value_name = "MODEL", env = "OPENAI_MODEL")]
     openai_model: Option<String>,
-    #[arg(long)]
+    /// Base URL of the chat completions API [default: https://api.openai.com/v1]
+    #[arg(long, value_name = "URL", env = "OPENAI_BASE_URL")]
     openai_base_url: Option<String>,
-    #[arg(long)]
+    /// Maximum diff characters sent to the LLM [default: 100000]
+    #[arg(long, value_name = "CHARS", env = "MAX_DIFF_CHARS")]
     max_diff_chars: Option<usize>,
-    #[arg(long)]
+    /// Port to listen on [default: 3000]
+    #[arg(long, value_name = "PORT", env = "PORT")]
     port: Option<u16>,
 }
 
@@ -75,6 +86,7 @@ struct SavedConfig {
     port: Option<u16>,
 }
 
+#[derive(Debug)]
 struct Config {
     github_app_id: u64,
     github_private_key_path: String,
@@ -178,10 +190,23 @@ struct AppClaims {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let log_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter)
+        .with_ansi(io::stderr().is_terminal())
+        .init();
 
     let config = Args::parse().into_config()?;
     let address = SocketAddr::from(([0, 0, 0, 0], config.port));
+    info!(
+        username = %config.github_username,
+        github_app_id = config.github_app_id,
+        model = %config.llm_model,
+        base_url = %config.llm_base_url,
+        max_diff_chars = config.max_diff_chars,
+        "starting"
+    );
     let state = AppState::from_config(config)?;
 
     let app = Router::new()
@@ -189,8 +214,8 @@ async fn main() -> Result<()> {
         .route("/webhooks/github", post(github_webhook))
         .with_state(state);
 
-    info!(%address, "listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
+    info!(address = %listener.local_addr()?, "listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -249,31 +274,18 @@ impl AppState {
 
 impl Args {
     fn into_config(self) -> Result<Config> {
-        let cli_mode = self.has_flags();
         let mut saved = SavedConfig::load()?;
         self.apply_to(&mut saved);
+        saved.normalize();
 
-        if cli_mode {
-            saved.fill_defaults();
-        } else {
-            saved.prompt_missing()?;
+        // Interactive runs prompt for missing values; anything already provided
+        // via flag, env, or the config file is kept as-is.
+        if io::stdin().is_terminal() && saved.prompt_missing()? {
+            saved.save()?;
+            println!("\nConfiguration saved to {CONFIG_FILE}.");
         }
 
-        let config = saved.to_config()?;
-        saved.save()?;
-        Ok(config)
-    }
-
-    fn has_flags(&self) -> bool {
-        self.github_app_id.is_some()
-            || self.github_private_key_path.is_some()
-            || self.github_username.is_some()
-            || self.webhook_secret.is_some()
-            || self.openai_api_key.is_some()
-            || self.openai_model.is_some()
-            || self.openai_base_url.is_some()
-            || self.max_diff_chars.is_some()
-            || self.port.is_some()
+        saved.to_config()
     }
 
     fn apply_to(self, saved: &mut SavedConfig) {
@@ -319,117 +331,174 @@ impl SavedConfig {
 
     fn save(&self) -> Result<()> {
         let contents = serde_yaml::to_string(self)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(CONFIG_FILE)
-            .with_context(|| format!("could not create {CONFIG_FILE}"))?;
-
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-
+        let mut file = options
+            .open(CONFIG_FILE)
+            .with_context(|| format!("could not create {CONFIG_FILE}"))?;
         file.write_all(contents.as_bytes())?;
         Ok(())
     }
 
-    fn fill_defaults(&mut self) {
-        self.openai_model
-            .get_or_insert_with(|| DEFAULT_MODEL.to_owned());
-        self.openai_base_url
-            .get_or_insert_with(|| DEFAULT_BASE_URL.to_owned());
-        self.max_diff_chars.get_or_insert(DEFAULT_MAX_DIFF_CHARS);
-        self.port.get_or_insert(DEFAULT_PORT);
+    /// Treat blank strings as unset so `--flag ""` and empty YAML values
+    /// prompt (or error) the same as missing values.
+    fn normalize(&mut self) {
+        for value in [
+            &mut self.github_private_key_path,
+            &mut self.github_username,
+            &mut self.webhook_secret,
+            &mut self.openai_api_key,
+            &mut self.openai_model,
+            &mut self.openai_base_url,
+        ] {
+            if value.as_ref().is_some_and(|v| v.trim().is_empty()) {
+                *value = None;
+            }
+        }
     }
 
-    fn prompt_missing(&mut self) -> Result<()> {
-        println!("GitHub PR review bot setup (press Enter to use defaults)\n");
+    fn has_all_required(&self) -> bool {
+        self.github_app_id.is_some()
+            && self.github_private_key_path.is_some()
+            && self.github_username.is_some()
+            && self.webhook_secret.is_some()
+            && self.openai_api_key.is_some()
+    }
+
+    /// Prompt for missing values. Returns true when anything was prompted for.
+    /// Optional values keep their defaults silently once all required values
+    /// are present, so routine restarts never prompt.
+    fn prompt_missing(&mut self) -> Result<bool> {
+        if self.has_all_required() {
+            return Ok(false);
+        }
+
+        println!("GitHub PR review bot setup (press Enter to use defaults)");
 
         if self.github_username.is_none() {
-            self.github_username = Some(prompt("GitHub username")?);
+            println!();
+            self.github_username = Some(prompt_line("GitHub username", None)?);
         }
         if self.github_app_id.is_none() {
+            println!();
             println!("Create a GitHub App here:");
             println!("  {GITHUB_APP_CREATE_URL}");
             println!("Configure: Pull requests - Read and write; Metadata - Read.");
             println!("Subscribe to Pull request events.");
-            println!("Set the webhook URL to https://YOUR_SERVER/webhooks/github.\n");
-            self.github_app_id = Some(
-                prompt("GitHub App ID")?
-                    .parse()
-                    .context("GitHub App ID must be a number; find it in the App settings")?,
-            );
+            println!("Set the webhook URL to https://YOUR_SERVER/webhooks/github.");
+            self.github_app_id = Some(loop {
+                let value = prompt_line("GitHub App ID", None)?;
+                match value.parse::<u64>() {
+                    Ok(id) => break id,
+                    Err(_) => println!("GitHub App ID must be a number; find it in the App settings page. Try again."),
+                }
+            });
         }
         if self.github_private_key_path.is_none() {
-            self.github_private_key_path =
-                Some(prompt("Path to downloaded GitHub App private key")?);
+            println!();
+            self.github_private_key_path = Some(loop {
+                let path = prompt_line("Path to downloaded GitHub App private key", None)?;
+                match fs::read(&path) {
+                    Ok(bytes) => match EncodingKey::from_rsa_pem(&bytes) {
+                        Ok(_) => break path,
+                        Err(_) => println!("That file is not a valid RSA private key. Try again."),
+                    },
+                    Err(_) => println!("Could not read that file. Check the path and try again."),
+                }
+            });
         }
         if self.webhook_secret.is_none() {
             let username = self
                 .github_username
                 .as_deref()
                 .ok_or_else(|| anyhow!("GitHub username is required before App setup"))?;
+            println!();
             println!("Configure the App webhook here:");
             println!("  {GITHUB_APP_SETTINGS_URL}");
             println!("Install the App on your account with all or selected repositories.");
             println!("The webhook URL is https://YOUR_SERVER/webhooks/github.");
-            println!("The App webhook secret must match the value entered below.\n");
+            println!("The App webhook secret must match the value entered below.");
             println!("GitHub account: {username}");
             self.webhook_secret = Some(secret_prompt("GitHub App webhook secret")?);
         }
         if self.openai_api_key.is_none() {
+            println!();
             self.openai_api_key = Some(secret_prompt("OpenAI API key")?);
         }
         if self.openai_model.is_none() {
-            self.openai_model = Some(prompt_default("OpenAI model", DEFAULT_MODEL)?);
+            println!();
+            self.openai_model = Some(prompt_line("OpenAI model", Some(DEFAULT_MODEL))?);
         }
         if self.openai_base_url.is_none() {
-            self.openai_base_url = Some(prompt_default("OpenAI base URL", DEFAULT_BASE_URL)?);
+            println!();
+            self.openai_base_url = Some(prompt_line("OpenAI base URL", Some(DEFAULT_BASE_URL))?);
         }
         if self.max_diff_chars.is_none() {
-            self.max_diff_chars = Some(
-                prompt_default(
-                    "Maximum diff characters",
-                    &DEFAULT_MAX_DIFF_CHARS.to_string(),
-                )?
-                .parse()
-                .context("maximum diff characters must be a positive integer")?,
-            );
+            println!();
+            let default = DEFAULT_MAX_DIFF_CHARS.to_string();
+            self.max_diff_chars = Some(loop {
+                let value = prompt_line("Maximum diff characters", Some(&default))?;
+                match value.parse::<usize>() {
+                    Ok(n) if n > 0 => break n,
+                    _ => println!("Maximum diff characters must be a positive integer. Try again."),
+                }
+            });
         }
         if self.port.is_none() {
-            self.port = Some(
-                prompt_default("Port", &DEFAULT_PORT.to_string())?
-                    .parse()
-                    .context("port must be a number between 1 and 65535")?,
-            );
+            println!();
+            let default = DEFAULT_PORT.to_string();
+            self.port = Some(loop {
+                let value = prompt_line("Port", Some(&default))?;
+                match value.parse::<u16>() {
+                    Ok(port) if port > 0 => break port,
+                    _ => println!("Port must be a number between 1 and 65535. Try again."),
+                }
+            });
         }
-        Ok(())
+        Ok(true)
     }
 
     fn to_config(&self) -> Result<Config> {
+        let mut missing = Vec::new();
+        if self.github_username.is_none() {
+            missing.push("--github-username");
+        }
+        if self.github_app_id.is_none() {
+            missing.push("--github-app-id");
+        }
+        if self.github_private_key_path.is_none() {
+            missing.push("--github-private-key-path");
+        }
+        if self.webhook_secret.is_none() {
+            missing.push("--webhook-secret");
+        }
+        if self.openai_api_key.is_none() {
+            missing.push("--openai-api-key");
+        }
+        if !missing.is_empty() {
+            return Err(anyhow!(
+                "missing required configuration: {}. Pass them as flags or environment variables (see --help), set them in {CONFIG_FILE}, or run interactively for the setup wizard",
+                missing.join(", ")
+            ));
+        }
         Ok(Config {
-            github_app_id: self.github_app_id.ok_or_else(|| {
-                anyhow!("github_app_id is required; provide it as a CLI flag or in the wizard")
-            })?,
-            github_private_key_path: required_value(
-                &self.github_private_key_path,
-                "github_private_key_path",
-            )?,
-            github_username: required_value(&self.github_username, "github_username")?,
-            webhook_secret: required_value(&self.webhook_secret, "webhook_secret")?,
-            llm_api_key: required_value(&self.openai_api_key, "openai_api_key")?,
+            github_app_id: self.github_app_id.expect("checked above"),
+            github_private_key_path: self.github_private_key_path.clone().expect("checked above"),
+            github_username: self.github_username.clone().expect("checked above"),
+            webhook_secret: self.webhook_secret.clone().expect("checked above"),
+            llm_api_key: self.openai_api_key.clone().expect("checked above"),
             llm_base_url: self
                 .openai_base_url
-                .as_ref()
-                .cloned()
+                .clone()
                 .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
             llm_model: self
                 .openai_model
-                .as_ref()
-                .cloned()
+                .clone()
                 .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
             max_diff_chars: self.max_diff_chars.unwrap_or(DEFAULT_MAX_DIFF_CHARS),
             port: self.port.unwrap_or(DEFAULT_PORT),
@@ -437,48 +506,45 @@ impl SavedConfig {
     }
 }
 
-fn required_value(value: &Option<String>, name: &str) -> Result<String> {
-    value
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(|| anyhow!("{name} is required; provide it as a CLI flag or in the wizard"))
-}
-
-fn prompt(label: &str) -> Result<String> {
-    print!("{label}: ");
-    io::stdout().flush()?;
-    let mut value = String::new();
-    io::stdin().read_line(&mut value)?;
-    let value = value.trim().to_owned();
-    if value.is_empty() {
-        return Err(anyhow!("{label} cannot be empty"));
+/// Prompt for one line, retrying on empty input for required values.
+/// `default` is returned on empty input when present.
+fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
+    loop {
+        match default {
+            Some(value) => print!("{label} [{value}]: "),
+            None => print!("{label}: "),
+        }
+        io::stdout().flush()?;
+        let mut value = String::new();
+        if io::stdin().read_line(&mut value)? == 0 {
+            return Err(anyhow!("setup cancelled: input closed"));
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            if let Some(value) = default {
+                return Ok(value.to_owned());
+            }
+            println!("{label} cannot be empty. Try again.");
+        } else {
+            return Ok(value.to_owned());
+        }
     }
-    Ok(value)
-}
-
-fn prompt_default(label: &str, default: &str) -> Result<String> {
-    print!("{label} [{default}]: ");
-    io::stdout().flush()?;
-    let mut value = String::new();
-    io::stdin().read_line(&mut value)?;
-    let value = value.trim();
-    Ok(if value.is_empty() {
-        default.to_owned()
-    } else {
-        value.to_owned()
-    })
 }
 
 fn secret_prompt(label: &str) -> Result<String> {
-    print!("{label}: ");
-    io::stdout().flush()?;
-    let value = rpassword::read_password()?.trim().to_owned();
-    println!();
-    if value.is_empty() {
-        return Err(anyhow!("{label} cannot be empty"));
+    loop {
+        print!("{label}: ");
+        io::stdout().flush()?;
+        let value = rpassword::read_password()
+            .context("setup cancelled: input closed")?
+            .trim()
+            .to_owned();
+        if value.is_empty() {
+            println!("{label} cannot be empty. Try again.");
+        } else {
+            return Ok(value);
+        }
     }
-    Ok(value)
 }
 
 async fn github_webhook(
@@ -715,6 +781,85 @@ async fn generate_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn complete_config() -> SavedConfig {
+        SavedConfig {
+            github_app_id: Some(123456),
+            github_private_key_path: Some("key.pem".to_owned()),
+            github_username: Some("octocat".to_owned()),
+            webhook_secret: Some("secret".to_owned()),
+            openai_api_key: Some("sk-test".to_owned()),
+            openai_model: None,
+            openai_base_url: None,
+            max_diff_chars: None,
+            port: None,
+        }
+    }
+
+    #[test]
+    fn missing_config_lists_all_flag_names() {
+        let error = SavedConfig::default().to_config().unwrap_err().to_string();
+        for flag in [
+            "--github-username",
+            "--github-app-id",
+            "--github-private-key-path",
+            "--webhook-secret",
+            "--openai-api-key",
+        ] {
+            assert!(error.contains(flag), "error names {flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn blank_values_count_as_missing() {
+        let mut saved = complete_config();
+        saved.github_username = Some("  ".to_owned());
+        saved.normalize();
+        assert!(!saved.has_all_required());
+        let error = saved.to_config().unwrap_err().to_string();
+        assert!(error.contains("--github-username"), "{error}");
+        assert!(!error.contains("--github-app-id"), "{error}");
+    }
+
+    #[test]
+    fn optionals_fall_back_to_defaults() {
+        let config = complete_config().to_config().unwrap();
+        assert_eq!(config.llm_model, DEFAULT_MODEL);
+        assert_eq!(config.llm_base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.max_diff_chars, DEFAULT_MAX_DIFF_CHARS);
+        assert_eq!(config.port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn complete_config_never_prompts() {
+        let mut saved = complete_config();
+        assert!(!saved.prompt_missing().unwrap());
+    }
+
+    #[test]
+    fn cli_flags_override_saved_values() {
+        let mut saved = complete_config();
+        Args::try_parse_from(["bot", "--github-username", "new-name", "--port", "4000"])
+            .unwrap()
+            .apply_to(&mut saved);
+        assert_eq!(saved.github_username.as_deref(), Some("new-name"));
+        assert_eq!(saved.port, Some(4000));
+        assert_eq!(saved.github_app_id, Some(123456));
+    }
+
+    #[test]
+    fn help_shows_real_defaults() {
+        let help = Args::command().render_help().to_string();
+        for default in [
+            DEFAULT_MODEL,
+            DEFAULT_BASE_URL,
+            &DEFAULT_MAX_DIFF_CHARS.to_string(),
+            &DEFAULT_PORT.to_string(),
+        ] {
+            assert!(help.contains(default), "help shows {default}");
+        }
+    }
 
     #[test]
     fn accepts_valid_github_signature() {

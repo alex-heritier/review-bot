@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 axum = "0.7"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 hmac = "0.12"

@@ -13,13 +13,15 @@ Small self-hosted GitHub PR review bot. It receives a GitHub App `pull_request` 
 
 ## Run
 
-On first run, with no configuration flags, the bot starts a small setup wizard and hides secret input. The completed configuration is saved to `.review-bot.yaml`; later runs only prompt for values that are missing:
+Configuration resolves as: CLI flag > environment variable > `.review-bot.yaml` > default. Run with `--help` to see every flag with its env var and default.
 
 ```sh
 cargo run --release
 ```
 
-For unattended startup, pass the required values as flags. If any configuration flag is present, the wizard is not shown and missing required values must come from `.review-bot.yaml` or another flag:
+When run interactively, missing required values start a setup wizard (secret input is hidden); the completed configuration is saved to `.review-bot.yaml` with `0600` permissions. Flags and env vars are never written back to the file. Non-interactive runs fail fast, naming every missing flag.
+
+For unattended startup, pass the required values as flags or env vars:
 
 ```sh
 cargo run --release -- \
@@ -30,7 +32,7 @@ cargo run --release -- \
   --openai-api-key sk-...
 ```
 
-Optional flags are `--openai-model`, `--openai-base-url`, `--max-diff-chars`, and `--port`. Run with `--help` to see all flags.
+Optional values are `--openai-model`, `--openai-base-url`, `--max-diff-chars`, and `--port`; defaults are listed in `--help`.
 
 The server listens on `0.0.0.0:3000` by default. Put it behind a TLS reverse proxy such as Caddy or nginx; do not expose the service directly over plain HTTP to GitHub.
 
@@ -59,5 +61,5 @@ Check availability with `GET /health`.
 - Use a long random webhook secret, for example `openssl rand -hex 32`.
 - Restrict the App installation to only the repositories that need reviews, if preferred.
 - Keep the downloaded private key and `.review-bot.yaml` private and out of version control.
-- Do not put tokens in shell history for long-lived deployments; use the wizard or a service manager's secret handling.
+- Do not put tokens in shell history for long-lived deployments; use the wizard or environment variables via your service manager's secret handling.
 - Run behind HTTPS and a reverse proxy with request-size limits.
