@@ -17,6 +17,17 @@ The bot is deliberately thin: the GitHub App plumbing (webhook, installation aut
 
 ## Run
 
+Or provision the whole machine in one shot (prerequisite checks, `ocr`
+install, release build, dedicated service user, hardened systemd unit):
+
+```sh
+sudo ./install.sh
+```
+
+The script is idempotent and prints the remaining manual steps (GitHub App
+setup and the first-run wizard). The rest of this section describes the
+manual path.
+
 Configuration resolves as: CLI flag > environment variable > `.review-bot.yaml` > default. Run with `--help` to see every flag with its env var and default.
 
 ```sh
