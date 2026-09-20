@@ -145,13 +145,15 @@ fn to_review_comment(comment: &OcrComment) -> Option<github::CommentSpec> {
     if start.is_none() && end.is_none() {
         return None;
     }
-    // A range whose ends coincide (or a lone bound) is a single-line comment.
-    let start_line = start.filter(|s| Some(*s) != end);
+    // Single-line when both bounds coincide or only one exists; GitHub
+    // rejects a range whose start equals its end.
+    let line = end.or(start);
+    let start_line = start.zip(line).filter(|(s, l)| s != l).map(|(s, _)| s);
     Some(github::CommentSpec {
         path: comment.path.clone(),
         body: comment_body(comment),
         start_line,
-        line: end.or(start),
+        line,
     })
 }
 
@@ -248,13 +250,15 @@ fn ocr_home() -> Result<PathBuf> {
 }
 
 async fn sync_repository(token: &str, request: &ReviewRequest, workdir: &Path) -> Result<()> {
-    if !workdir.join(".git").exists() {
-        git(&["clone", "--quiet", &request.clone_url, &workdir.to_string_lossy()]).await?;
-    }
-    // The token rides in one fetch argv entry and is never persisted into
-    // the remote URL. Single-user host: acceptable; on shared hosts run the
+    // The token rides in argv for the authed clone/fetch entries and is never
+    // persisted into the remote URL (the clone rewrites origin to the clean
+    // URL immediately). Single-user host: acceptable; on shared hosts run the
     // bot as a dedicated user.
     let auth_url = with_token(&request.clone_url, token)?;
+    if !workdir.join(".git").exists() {
+        git(&["clone", "--quiet", &auth_url, &workdir.to_string_lossy()]).await?;
+        git(&["-C", &workdir.to_string_lossy(), "remote", "set-url", "origin", &request.clone_url]).await?;
+    }
     let base_spec = format!(
         "refs/heads/{}:refs/remotes/origin/{}",
         request.base_ref, request.base_ref
@@ -308,6 +312,21 @@ fn with_token(clone_url: &str, token: &str) -> Result<String> {
     Ok(format!("https://x-access-token:{token}@{rest}"))
 }
 
+/// Name of the git subcommand in an argv slice, for error messages.
+fn git_label<'a>(args: &[&'a str]) -> &'a str {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "-C" => {
+                it.next();
+            }
+            arg if !arg.starts_with('-') => return arg,
+            _ => {}
+        }
+    }
+    "git"
+}
+
 async fn git(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -317,7 +336,7 @@ async fn git(args: &[&str]) -> Result<String> {
     if !output.status.success() {
         return Err(anyhow!(
             "git {} failed: {}",
-            args.iter().find(|arg| !arg.starts_with('-')).copied().unwrap_or_default(),
+            git_label(args),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -441,6 +460,17 @@ mod tests {
         let spec = to_review_comment(&comment(Some(7), Some(7))).unwrap();
         assert_eq!(spec.start_line, None);
         assert_eq!(spec.line, Some(7));
+    }
+
+    #[test]
+    fn start_only_finding_is_single_line() {
+        // GitHub rejects start_line == line; a lone bound must collapse to line.
+        let spec = to_review_comment(&comment(Some(7), None)).unwrap();
+        assert_eq!(spec.start_line, None);
+        assert_eq!(spec.line, Some(7));
+        let spec = to_review_comment(&comment(None, Some(9))).unwrap();
+        assert_eq!(spec.start_line, None);
+        assert_eq!(spec.line, Some(9));
     }
 
     #[test]
