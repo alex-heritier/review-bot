@@ -27,8 +27,8 @@ pub(crate) struct AppState {
     pub(crate) llm_api_key: Arc<str>,
     pub(crate) llm_base_url: Arc<str>,
     pub(crate) llm_model: Arc<str>,
-    pub(crate) max_diff_chars: usize,
     pub(crate) client: Client,
+    pub(crate) review_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -48,10 +48,10 @@ impl AppState {
             llm_api_key: config.llm_api_key.into(),
             llm_base_url: config.llm_base_url.trim_end_matches('/').to_owned().into(),
             llm_model: config.llm_model.into(),
-            max_diff_chars: config.max_diff_chars,
             client: Client::builder()
                 .user_agent("github-pr-review-bot")
                 .build()?,
+            review_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         github_app_id = config.github_app_id,
         model = %config.llm_model,
         base_url = %config.llm_base_url,
-        max_diff_chars = config.max_diff_chars,
+        engine = "ocr",
         "starting"
     );
     let state = AppState::from_config(config)?;

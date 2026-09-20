@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const DEFAULT_MODEL: &str = "gpt-4o-mini";
-pub(crate) const DEFAULT_MAX_DIFF_CHARS: usize = 100_000;
 pub(crate) const DEFAULT_PORT: u16 = 3000;
 const GITHUB_APP_CREATE_URL: &str = "https://github.com/settings/apps/new?name=github-pr-review-bot&description=Self-hosted%20PR%20review%20bot&public=false&pull_requests=write&metadata=read&webhook_active=true&events[]=pull_request";
 const GITHUB_APP_SETTINGS_URL: &str = "https://github.com/settings/apps";
@@ -50,9 +49,6 @@ pub(crate) struct Args {
     /// Base URL of the chat completions API [default: https://api.openai.com/v1]
     #[arg(long, value_name = "URL", env = "OPENAI_BASE_URL")]
     openai_base_url: Option<String>,
-    /// Maximum diff characters sent to the LLM [default: 100000]
-    #[arg(long, value_name = "CHARS", env = "MAX_DIFF_CHARS")]
-    max_diff_chars: Option<usize>,
     /// Port to listen on [default: 3000]
     #[arg(long, value_name = "PORT", env = "PORT")]
     port: Option<u16>,
@@ -67,7 +63,6 @@ struct SavedConfig {
     openai_api_key: Option<String>,
     openai_model: Option<String>,
     openai_base_url: Option<String>,
-    max_diff_chars: Option<usize>,
     port: Option<u16>,
 }
 
@@ -80,7 +75,6 @@ pub(crate) struct Config {
     pub(crate) llm_api_key: String,
     pub(crate) llm_base_url: String,
     pub(crate) llm_model: String,
-    pub(crate) max_diff_chars: usize,
     pub(crate) port: u16,
 }
 
@@ -121,9 +115,6 @@ impl Args {
         }
         if self.openai_base_url.is_some() {
             saved.openai_base_url = self.openai_base_url;
-        }
-        if self.max_diff_chars.is_some() {
-            saved.max_diff_chars = self.max_diff_chars;
         }
         if self.port.is_some() {
             saved.port = self.port;
@@ -250,17 +241,6 @@ impl SavedConfig {
             println!();
             self.openai_base_url = Some(prompt_line("OpenAI base URL", Some(DEFAULT_BASE_URL))?);
         }
-        if self.max_diff_chars.is_none() {
-            println!();
-            let default = DEFAULT_MAX_DIFF_CHARS.to_string();
-            self.max_diff_chars = Some(loop {
-                let value = prompt_line("Maximum diff characters", Some(&default))?;
-                match value.parse::<usize>() {
-                    Ok(n) if n > 0 => break n,
-                    _ => println!("Maximum diff characters must be a positive integer. Try again."),
-                }
-            });
-        }
         if self.port.is_none() {
             println!();
             let default = DEFAULT_PORT.to_string();
@@ -312,7 +292,6 @@ impl SavedConfig {
                 .openai_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
-            max_diff_chars: self.max_diff_chars.unwrap_or(DEFAULT_MAX_DIFF_CHARS),
             port: self.port.unwrap_or(DEFAULT_PORT),
         })
     }
@@ -373,7 +352,6 @@ mod tests {
             openai_api_key: Some("sk-test".to_owned()),
             openai_model: None,
             openai_base_url: None,
-            max_diff_chars: None,
             port: None,
         }
     }
@@ -408,7 +386,6 @@ mod tests {
         let config = complete_config().to_config().unwrap();
         assert_eq!(config.llm_model, DEFAULT_MODEL);
         assert_eq!(config.llm_base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.max_diff_chars, DEFAULT_MAX_DIFF_CHARS);
         assert_eq!(config.port, DEFAULT_PORT);
     }
 
@@ -435,7 +412,6 @@ mod tests {
         for default in [
             DEFAULT_MODEL,
             DEFAULT_BASE_URL,
-            &DEFAULT_MAX_DIFF_CHARS.to_string(),
             &DEFAULT_PORT.to_string(),
         ] {
             assert!(help.contains(default), "help shows {default}");

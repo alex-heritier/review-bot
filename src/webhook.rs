@@ -15,7 +15,10 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{error, warn};
 
-use crate::{review, AppState};
+use crate::{
+    review::{review_pull_request, ReviewRequest},
+    AppState,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -35,6 +38,7 @@ struct Installation {
 #[derive(Debug, Deserialize)]
 struct Repository {
     full_name: String,
+    clone_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +46,15 @@ struct PullRequest {
     number: u64,
     draft: Option<bool>,
     user: User,
+    base: GitRef,
+    head: GitRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitRef {
+    #[serde(rename = "ref")]
+    name: String,
+    sha: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,43 +87,43 @@ pub(crate) async fn github_webhook(
         }
     };
 
-    if !matches!(event.action.as_str(), "opened" | "reopened" | "synchronize") {
-        return StatusCode::NO_CONTENT;
-    }
+    let request = match review_request(&event, &state.github_username) {
+        Some(request) => request,
+        None => return StatusCode::NO_CONTENT,
+    };
 
-    if event.pull_request.draft.unwrap_or(false) {
-        return StatusCode::NO_CONTENT;
-    }
-
-    if !event
-        .pull_request
-        .user
-        .login
-        .eq_ignore_ascii_case(&state.github_username)
-    {
-        return StatusCode::NO_CONTENT;
-    }
-
-    let state_for_task = state.clone();
     tokio::spawn(async move {
-        let repository = event.repository.full_name;
-        let number = event.pull_request.number;
-        let author = event.pull_request.user.login;
-        let installation_id = event.installation.id;
-        if let Err(error) = review::review_pull_request(
-            &state_for_task,
-            &repository,
-            number,
-            &author,
-            installation_id,
-        )
-        .await
-        {
-            error!(%error, %repository, number, "PR review failed");
+        let full_name = request.full_name.clone();
+        let number = request.number;
+        if let Err(error) = review_pull_request(&state, &request).await {
+            error!(%error, %full_name, number, "PR review failed");
         }
     });
 
     StatusCode::ACCEPTED
+}
+
+/// Turn a webhook event into a review request, or `None` when the event is
+/// not one this bot reviews: wrong action, draft PR, or another author.
+fn review_request(event: &PullRequestEvent, username: &str) -> Option<ReviewRequest> {
+    if !matches!(event.action.as_str(), "opened" | "reopened" | "synchronize") {
+        return None;
+    }
+    if event.pull_request.draft.unwrap_or(false) {
+        return None;
+    }
+    if !event.pull_request.user.login.eq_ignore_ascii_case(username) {
+        return None;
+    }
+    Some(ReviewRequest {
+        full_name: event.repository.full_name.clone(),
+        clone_url: event.repository.clone_url.clone(),
+        number: event.pull_request.number,
+        author: event.pull_request.user.login.clone(),
+        base_ref: event.pull_request.base.name.clone(),
+        head_sha: event.pull_request.head.sha.clone(),
+        installation_id: event.installation.id,
+    })
 }
 
 fn valid_signature(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
@@ -164,5 +177,62 @@ mod tests {
         );
 
         assert!(!valid_signature("secret", &headers, b"body"));
+    }
+
+    fn event(action: &str, draft: bool, author: &str) -> PullRequestEvent {
+        serde_json::from_value(serde_json::json!({
+            "action": action,
+            "installation": {"id": 42},
+            "repository": {
+                "full_name": "alex-heritier/review-bot",
+                "clone_url": "https://github.com/alex-heritier/review-bot.git"
+            },
+            "pull_request": {
+                "number": 7,
+                "draft": draft,
+                "user": {"login": author},
+                "base": {"ref": "master", "sha": "aaa"},
+                "head": {"ref": "feature", "sha": "bbb"}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn eligible_event_becomes_full_review_request() {
+        let request = review_request(&event("opened", false, "Alex-Heritier"), "alex-heritier")
+            .expect("opened PR by owner is reviewed (case-insensitive)");
+        assert_eq!(request.full_name, "alex-heritier/review-bot");
+        assert_eq!(
+            request.clone_url,
+            "https://github.com/alex-heritier/review-bot.git"
+        );
+        assert_eq!(request.number, 7);
+        assert_eq!(request.base_ref, "master");
+        assert_eq!(request.head_sha, "bbb");
+        assert_eq!(request.installation_id, 42);
+    }
+
+    #[test]
+    fn ineligible_events_are_dropped() {
+        assert!(
+            review_request(&event("closed", false, "alex-heritier"), "alex-heritier").is_none()
+        );
+        assert!(
+            review_request(&event("opened", true, "alex-heritier"), "alex-heritier").is_none()
+        );
+        assert!(review_request(
+            &event("synchronize", false, "someone-else"),
+            "alex-heritier"
+        )
+        .is_none());
+        assert!(
+            review_request(&event("reopened", false, "alex-heritier"), "alex-heritier").is_some()
+        );
+        assert!(review_request(
+            &event("synchronize", false, "alex-heritier"),
+            "alex-heritier"
+        )
+        .is_some());
     }
 }
