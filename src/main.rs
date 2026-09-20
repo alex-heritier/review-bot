@@ -3,6 +3,7 @@
 mod config;
 mod github;
 mod review;
+mod probe;
 mod webhook;
 
 use std::{io::{self, IsTerminal}, net::SocketAddr, sync::Arc};
