@@ -1,4 +1,4 @@
-//! Core: the review workflow.
+//! Review: the review workflow.
 //!
 //! Orchestrates one full review: token, diff, truncation, LLM review, post.
 

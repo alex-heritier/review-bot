@@ -1,8 +1,8 @@
 //! CLI entry point: parses arguments, builds the App state, and serves it.
 
 mod config;
-mod core;
 mod github;
+mod review;
 mod webhook;
 
 use std::{io::{self, IsTerminal}, net::SocketAddr, sync::Arc};

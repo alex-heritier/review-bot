@@ -1,7 +1,7 @@
 //! Webhook: receives GitHub webhook requests.
 //!
 //! Verifies the HMAC signature, filters for review-worthy `pull_request`
-//! events, and hands the review off to the core workflow.
+//! events, and hands them off to the review workflow.
 
 use axum::{
     body::Bytes,
@@ -15,7 +15,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{error, warn};
 
-use crate::{core, AppState};
+use crate::{review, AppState};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -97,7 +97,7 @@ pub(crate) async fn github_webhook(
         let number = event.pull_request.number;
         let author = event.pull_request.user.login;
         let installation_id = event.installation.id;
-        if let Err(error) = core::review_pull_request(
+        if let Err(error) = review::review_pull_request(
             &state_for_task,
             &repository,
             number,
