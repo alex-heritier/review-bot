@@ -1,25 +1,98 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="A self-hosted GitHub pull request review bot powered by OpenCodeReview.">
-    <title>GitHub PR Review Bot</title>
-    <style>
-      :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
-      body { max-width: 44rem; margin: 0 auto; padding: 4rem 1.5rem; }
-      h1 { line-height: 1.2; }
-      a { color: #0969da; }
-      @media (prefers-color-scheme: dark) { a { color: #80b9ff; } }
-    </style>
-  </head>
-  <body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="description" content="A self-hosted GitHub pull request review bot powered by OpenCodeReview.">
+  <title>Review Bot — A second set of eyes for every PR</title>
+  <style>
+    :root { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #eef2ff; background: #0b1020; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    a { color: inherit; text-decoration: none; }
+    .page { min-height: 100vh; overflow: hidden; background: radial-gradient(ellipse 55rem 38rem at 78% 28%, #243379 0%, transparent 66%), radial-gradient(ellipse 45rem 30rem at 10% 78%, #172d43 0%, transparent 72%), #0b1020; }
+    .wrap { width: min(1120px, calc(100% - 48px)); margin: auto; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 28px 0; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -.04em; font-size: 1.1rem; }
+    .mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #081220; background: #8df0d1; font-size: 1.15rem; }
+    .nav-link { color: #aeb8d2; font-size: .9rem; font-weight: 600; }
+    .nav-link:hover, .text-link:hover, footer a:hover { color: #8df0d1; }
+    .hero { display: grid; grid-template-columns: 1fr 1.05fr; align-items: center; gap: 55px; padding: 100px 0 120px; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 9px; padding: 8px 13px; border: 1px solid #335364; border-radius: 999px; color: #a6f2df; background: #1430399c; font-size: .78rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+    .eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #8df0d1; box-shadow: 0 0 12px #8df0d1; }
+    h1 { margin: 24px 0 20px; font-size: clamp(3.2rem, 6vw, 5.7rem); line-height: 1.04; letter-spacing: -.075em; }
+    h1 span { display: block; color: #8df0d1; }
+    .intro { max-width: 510px; color: #aeb8d2; font-size: 1.13rem; line-height: 1.7; }
+    .actions { display: flex; align-items: center; gap: 25px; flex-wrap: wrap; margin-top: 35px; }
+    .button { display: inline-flex; align-items: center; gap: 10px; min-height: 50px; padding: 0 20px; border-radius: 12px; background: #8df0d1; color: #0b1721; font-weight: 800; box-shadow: 0 12px 35px #3ce3b52b; transition: transform .2s, background .2s; }
+    .button:hover { transform: translateY(-3px); background: #b2ffe7; }
+    .text-link { color: #d3daf0; font-size: .92rem; font-weight: 700; }
+    .preview { position: relative; transform: rotate(2deg); }
+    .preview::before { content: ""; position: absolute; inset: 12% 5%; border-radius: 50%; background: #66dfd4; filter: blur(90px); opacity: .2; }
+    .window { position: relative; border: 1px solid #35445f; border-radius: 18px; background: #111a2e; box-shadow: 0 35px 90px #0008; overflow: hidden; }
+    .window-top { display: flex; align-items: center; gap: 7px; padding: 16px 19px; border-bottom: 1px solid #27344b; background: #172238; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #53627c; }
+    .window-title { margin-left: 11px; color: #8b9ab5; font-size: .75rem; font-weight: 600; }
+    .window-body { padding: 25px; }
+    .pr-label { color: #7e91af; font-size: .73rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .pr-title { margin: 7px 0 22px; font-size: 1.1rem; font-weight: 750; }
+    .code { padding: 16px; border: 1px solid #273850; border-radius: 10px; background: #0c1425; color: #a9b9d2; font: .79rem/1.85 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; overflow: hidden; }
+    .line { color: #52647e; padding-right: 14px; }
+    .removed, .added { display: block; margin: 0 -16px; padding: 0 16px; }
+    .removed { background: #482b3980; color: #ffb4bf; }
+    .added { background: #19483b80; color: #9df4cc; }
+    .comment { display: flex; gap: 12px; margin-top: 17px; padding: 16px; border: 1px solid #395568; border-radius: 11px; background: #1b3340; }
+    .avatar { display: grid; place-items: center; flex: none; width: 31px; height: 31px; border-radius: 9px; background: #8df0d1; color: #092026; font-weight: 900; }
+    .comment strong { color: #e9fff6; font-size: .82rem; }
+    .comment p { margin: 5px 0 0; color: #c3d6d5; font-size: .8rem; line-height: 1.5; }
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; padding: 0 0 95px; }
+    .feature { padding: 24px; border: 1px solid #2c3952; border-radius: 16px; background: #141d31b8; }
+    .feature-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: #254641; color: #8df0d1; font-size: 1.2rem; }
+    .feature h2 { margin: 18px 0 7px; font-size: 1rem; }
+    .feature p { margin: 0; color: #9dabca; font-size: .88rem; line-height: 1.6; }
+    footer { display: flex; justify-content: space-between; gap: 16px; padding: 25px 0 35px; border-top: 1px solid #2c3952; color: #8190ae; font-size: .82rem; }
+    @media (max-width: 850px) { .hero { grid-template-columns: 1fr; gap: 65px; padding: 65px 0 85px; } .preview { max-width: 620px; transform: none; } }
+    @media (max-width: 600px) { .wrap { width: calc(100% - 36px); } .hero { padding-top: 55px; } .features { grid-template-columns: 1fr; padding-bottom: 60px; } .window-body { padding: 16px; } footer { flex-direction: column; } }
+    @media (prefers-reduced-motion: reduce) { .button { transition: none; } }
+  </style>
+</head>
+<body>
+  <div class="page"><div class="wrap">
+    <header>
+      <a class="brand" href="./" aria-label="Review Bot home"><span class="mark" aria-hidden="true">✳</span> review bot</a>
+      <a class="nav-link" href="https://github.com/alex-heritier/review-bot">View on GitHub ↗</a>
+    </header>
     <main>
-      <h1>GitHub PR Review Bot</h1>
-      <p>A small, self-hosted bot that reviews pull requests with
-        <a href="https://github.com/alibaba/open-code-review">OpenCodeReview</a>
-        and posts findings as GitHub review comments.</p>
-      <p><a href="https://github.com/alex-heritier/review-bot">View the source and setup instructions on GitHub →</a></p>
+      <section class="hero" aria-labelledby="headline">
+        <div>
+          <div class="eyebrow">Your PR review companion</div>
+          <h1 id="headline">Ship with <span>more confidence.</span></h1>
+          <p class="intro">A self-hosted review bot that reads your pull requests, catches issues, and leaves useful comments right where your code lives.</p>
+          <div class="actions">
+            <a class="button" href="https://github.com/alex-heritier/review-bot#requirements">Get started <span aria-hidden="true">↗</span></a>
+            <a class="text-link" href="https://github.com/alex-heritier/review-bot#how-a-review-runs">See how it works →</a>
+          </div>
+        </div>
+        <div class="preview" aria-label="Example pull request review comment">
+          <div class="window">
+            <div class="window-top"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="window-title">pull request · review preview</span></div>
+            <div class="window-body">
+              <div class="pr-label">Pull request #42</div>
+              <div class="pr-title">Improve webhook handling</div>
+              <div class="code"><div><span class="line">18</span>fn verify_signature(request: &amp;Request) {</div><div class="removed"><span class="line">19</span>-  let signature = request.header("X-Hub-Signature-256");</div><div class="added"><span class="line">19</span>+  let signature = require_signature(request)?;</div><div><span class="line">20</span>   // process webhook</div><div><span class="line">21</span>}</div></div>
+              <div class="comment"><div class="avatar" aria-hidden="true">✳</div><div><strong>review bot</strong><p>Good call requiring a signature before processing the webhook. This closes the path for unsigned requests.</p></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="features" aria-label="What Review Bot does">
+        <div class="feature"><div class="feature-icon" aria-hidden="true">⌘</div><h2>Reviews in your workflow</h2><p>Findings arrive as GitHub review comments, including inline feedback when line details are available.</p></div>
+        <div class="feature"><div class="feature-icon" aria-hidden="true">◇</div><h2>Powered by OpenCodeReview</h2><p>Uses OpenCodeReview to inspect changes in the context of a local checkout of the pull request.</p></div>
+        <div class="feature"><div class="feature-icon" aria-hidden="true">↗</div><h2>Run it yourself</h2><p>Host the bot on your own machine and connect it to your repositories through a GitHub App.</p></div>
+      </section>
     </main>
-  </body>
+    <footer><span>Review Bot · Open source on GitHub</span><a href="https://github.com/alex-heritier/review-bot">Source &amp; setup instructions ↗</a></footer>
+  </div></div>
+</body>
 </html>
