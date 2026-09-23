@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         model = %config.llm_model,
         base_url = %config.llm_base_url,
         engine = "ocr",
-        "starting"
+        "starting review bot"
     );
     let state = AppState::from_config(config)?;
 
